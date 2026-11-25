@@ -1,0 +1,99 @@
+name: Compiler les zips
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '*.zip'
+      - '**/*.zip'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Trouver les zips à compiler
+        run: |
+          before="${{ github.event.before }}"
+          if [ "${{ github.event_name }}" = "push" ] && [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ]; then
+            changed=$(git diff --name-only --diff-filter=AM "$before" "${{ github.sha }}" || true)
+            if echo "$changed" | grep -q '^\.github/workflows/'; then
+              git ls-files '*.zip' > zips.txt
+            else
+              echo "$changed" | grep '\.zip$' > zips.txt || true
+            fi
+          else
+            git ls-files '*.zip' > zips.txt
+          fi
+          echo "Zips à compiler :"; cat zips.txt
+
+      - name: Décompresser et compiler
+        run: |
+          mkdir -p work dist
+          : > failed.txt
+          while read -r z; do
+            [ -n "$z" ] || continue
+            d="work/$(basename "$z" .zip)"
+            mkdir -p "$d"
+            unzip -q -o "$z" -d "$d"
+          done < zips.txt
+
+          while read -r s; do
+            proj=$(dirname "$s")
+            name=$(basename "$proj" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]/-/g')
+            if grep -q "com.android.application' version '7\." "$proj/build.gradle" 2>/dev/null; then v=7.6.4; else v=8.7; fi
+            echo "=== $name (Gradle $v) ==="
+            g="$HOME/gradle-$v"
+            if [ ! -d "$g" ]; then
+              curl -sSL -o "/tmp/gradle-$v.zip" "https://services.gradle.org/distributions/gradle-$v-bin.zip"
+              unzip -q "/tmp/gradle-$v.zip" -d /tmp/gradle-unzip-$v
+              mv /tmp/gradle-unzip-$v/gradle-$v "$g"
+            fi
+            if (cd "$proj" && "$g/bin/gradle" assembleDebug --no-daemon --console=plain); then
+              for f in $(cd "$proj" && find . -path '*/build/outputs/apk/debug/*.apk'); do
+                mod=$(echo "$f" | cut -d/ -f2)
+                if [ "$mod" = "app" ]; then n="$name.apk"; else n="$name-$mod.apk"; fi
+                cp "$proj/$f" "dist/$n"
+              done
+            else
+              echo "$name" >> failed.txt
+            fi
+          done < <(find work -name settings.gradle -not -path '*/build/*')
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('dist/*.apk') != '' }}
+        with:
+          name: apk
+          path: dist/*.apk
+
+      - name: Déplacer le tag latest
+        if: ${{ hashFiles('dist/*.apk') != '' }}
+        run: |
+          git tag -f latest
+          git push -f origin latest
+
+      - name: Publier la version latest
+        if: ${{ hashFiles('dist/*.apk') != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Dernière version
+          files: dist/*.apk
+
+      - name: Signaler les échecs
+        run: |
+          if [ -s failed.txt ]; then echo "Échec de compilation :"; cat failed.txt; exit 1; fi

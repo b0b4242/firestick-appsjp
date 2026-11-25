@@ -42,7 +42,7 @@ jobs:
 
       - name: Décompresser et compiler
         run: |
-          mkdir -p work dist
+          mkdir -p work dist logs
           : > failed.txt
           while read -r z; do
             [ -n "$z" ] || continue
@@ -62,37 +62,51 @@ jobs:
               unzip -q "/tmp/gradle-$v.zip" -d /tmp/gradle-unzip-$v
               mv /tmp/gradle-unzip-$v/gradle-$v "$g"
             fi
-            if (cd "$proj" && "$g/bin/gradle" assembleDebug --no-daemon --console=plain); then
+            log="logs/$name.log"
+            if (cd "$proj" && "$g/bin/gradle" assembleDebug --no-daemon --console=plain) > "$log" 2>&1; then
+              tail -n 5 "$log"
               for f in $(cd "$proj" && find . -path '*/build/outputs/apk/debug/*.apk'); do
                 mod=$(echo "$f" | cut -d/ -f2)
                 if [ "$mod" = "app" ]; then n="$name.apk"; else n="$name-$mod.apk"; fi
                 cp "$proj/$f" "dist/$n"
               done
             else
+              echo "ÉCHEC : $name"
               echo "$name" >> failed.txt
+              {
+                echo "Erreurs de compilation de $name (Gradle $v)"
+                echo
+                grep -nE "error:|^e: |What went wrong|Execution failed|Could not|FAILED" -A4 "$log" | head -80
+                echo
+                echo "----- fin du journal -----"
+                tail -n 30 "$log"
+              } > "dist/erreurs-$name.txt"
+              cat "dist/erreurs-$name.txt"
             fi
           done < <(find work -name settings.gradle -not -path '*/build/*')
           ls -l dist
 
       - uses: actions/upload-artifact@v4
-        if: ${{ hashFiles('dist/*.apk') != '' }}
+        if: ${{ hashFiles('dist/*') != '' }}
         with:
           name: apk
-          path: dist/*.apk
+          path: dist/*
 
       - name: Déplacer le tag latest
-        if: ${{ hashFiles('dist/*.apk') != '' }}
+        if: ${{ hashFiles('dist/*') != '' }}
         run: |
           git tag -f latest
           git push -f origin latest
 
       - name: Publier la version latest
-        if: ${{ hashFiles('dist/*.apk') != '' }}
+        if: ${{ hashFiles('dist/*') != '' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Dernière version
-          files: dist/*.apk
+          files: |
+            dist/*.apk
+            dist/*.txt
 
       - name: Signaler les échecs
         run: |
